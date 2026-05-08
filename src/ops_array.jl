@@ -58,11 +58,12 @@ backward(::OperatorNode{typeof(relu)}, x, g) = (g .* (x .> 0),)
 # dropout
 mutable struct DropoutOp
     p::Float32
-    mask::Union{Nothing, AbstractArray{Bool}}
+    mask::Union{Nothing, Array{Float32}}
+    refresh::Bool
 end
 
 function dropout(x::GraphNode, p::Float32)
-    return OperatorNode(DropoutOp(p, nothing), x)
+    return OperatorNode(DropoutOp(p, nothing, true), x)
 end
 
 function dropout(x::GraphNode, p::Real)
@@ -70,14 +71,25 @@ function dropout(x::GraphNode, p::Real)
 end
 
 forward(node::OperatorNode{DropoutOp}, x) = begin
-    if node.f.mask === nothing
-        node.f.mask = rand(Float32, size(x)...) .>= node.f.p # maska: true z prawdopodobieństwem 1-p
+    keep_scale = 1f0 / (1f0 - node.f.p)
+    if node.f.mask === nothing || size(node.f.mask) != size(x)
+        node.f.mask = zeros(Float32, size(x)...)
+        node.f.refresh = true
     end
-    return x .* node.f.mask ./ (1f0 - node.f.p) # skalowanie, żeby zachować wartość oczekiwaną, 
-    #np. przy p=0.5, maska jest true dla połowy elementów, więc dzielimy przez 0.5, żeby średnia była taka sama
+    if node.f.refresh
+        rand!(node.f.mask)
+        @. node.f.mask = ifelse(node.f.mask >= node.f.p, keep_scale, 0f0)
+        node.f.refresh = false
+    end
+    return x .* node.f.mask
 end
 
-backward(node::OperatorNode{DropoutOp}, x, g) = (g .* node.f.mask ./ (1f0 - node.f.p),)
+backward(node::OperatorNode{DropoutOp}, x, g) = (g .* node.f.mask,)
+
+function refresh_dropout_mask!(op::DropoutOp)
+    op.refresh = true
+    return nothing
+end
 
 # flatten
 flatten(x::AbstractArray) = ndims(x) == 4 ? reshape(x, prod(size(x)[1:3]), size(x, 4)) : reshape(x, :) 

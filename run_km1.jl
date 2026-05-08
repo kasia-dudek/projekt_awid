@@ -22,7 +22,7 @@ end
 # resetuje maski dropout przed kolejnym forwardem
 function reset_dropout_masks!(dropout_nodes)
     for node in dropout_nodes
-        node.f.mask = nothing
+        refresh_dropout_mask!(node.f)
     end
 end
 

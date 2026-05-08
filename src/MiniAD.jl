@@ -20,5 +20,6 @@ export Dense, Flatten, Chain, Dropout, Conv2D, MaxPool2D, relu
 export logsumexp, logitcrossentropy, softmax
 export params, sgd_step!, train!, eval!
 export load_fashionmnist, eachbatch, argmax_classes, accuracy
+export refresh_dropout_mask!
 
 end
