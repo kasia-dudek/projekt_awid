@@ -2,36 +2,52 @@
 # Przyjmujemy układ tensorów (H, W, C, N), czyli wysokość, szerokość, kanały, batch
 
 # operator splotu 2D z informacją o paddingu i kroku
-struct Conv2DOp
+mutable struct Conv2DOp
     pad::Tuple{Int,Int}
     stride::Tuple{Int,Int}
+    x_padded
+    out
+    dx_padded
+    dfilters
+    dbias
 end
 
 # operator maxpoolingu 2D z rozmiarem okna i krokiem
-struct MaxPool2DOp
+mutable struct MaxPool2DOp
     kernel::Tuple{Int,Int}
     stride::Tuple{Int,Int}
+    out
+    dx
 end
 
 # dodaje zerowy padding wokół wejścia
-function pad_input(x, pad_h, pad_w)
+function pad_input!(padded, x, pad_h, pad_w)
     H, W, C, N = size(x)  # wymiary wejścia
-    padded = zeros(eltype(x), H + 2 * pad_h, W + 2 * pad_w, C, N)  # nowa większa tablica
+    fill!(padded, zero(eltype(x)))
     padded[pad_h + 1:pad_h + H, pad_w + 1:pad_w + W, :, :] .= x  # wstawienie oryginalnych danych do środka
     return padded
 end
 
 # forward dla warstwy Conv2D
-function conv2d_forward(x, filters, bias, pad, stride)
-    pad_h, pad_w = pad  # padding w pionie i poziomie
-    stride_h, stride_w = stride  # krok przesuwania filtra
+function conv2d_forward(op::Conv2DOp, x, filters, bias)
+    pad_h, pad_w = op.pad  # padding w pionie i poziomie
+    stride_h, stride_w = op.stride  # krok przesuwania filtra
     k_h, k_w, C_in, C_out = size(filters)  # rozmiar filtrów i liczba kanałów
     H, W, _, N = size(x)  # rozmiar wejścia
-    x_padded = pad_input(x, pad_h, pad_w)  # wejście po dodaniu paddingu
+    padded_size = (H + 2 * pad_h, W + 2 * pad_w, C_in, N)
+    if op.x_padded === nothing || size(op.x_padded) != padded_size || eltype(op.x_padded) != eltype(x)
+        op.x_padded = zeros(eltype(x), padded_size)
+    end
+    x_padded = pad_input!(op.x_padded, x, pad_h, pad_w)  # wejście po dodaniu paddingu
     #output_size = (input_size + 2*padding - kernel_size) / stride + 1
     out_h = (H + 2 * pad_h - k_h) ÷ stride_h + 1  # wysokość wyjścia
     out_w = (W + 2 * pad_w - k_w) ÷ stride_w + 1  # szerokość wyjścia
-    out = zeros(eltype(x), out_h, out_w, C_out, N)  # tensor wyjściowy
+    out_size = (out_h, out_w, C_out, N)
+    if op.out === nothing || size(op.out) != out_size || eltype(op.out) != eltype(x)
+        op.out = zeros(eltype(x), out_size)
+    end
+    out = op.out
+    fill!(out, zero(eltype(x)))
 
     @inbounds for n in 1:N # który obrazek w batchu
         @inbounds for oc in 1:C_out # który kanał wyjściowy (filtr)
@@ -64,10 +80,28 @@ function conv2d_backward(node::OperatorNode{Conv2DOp}, x, filters, bias, g)
     stride_h, stride_w = node.f.stride  # odczytanie kroku z operatora
     k_h, k_w, C_in, C_out = size(filters)  # wymiary filtrów
     H, W, _, N = size(x)  # wymiary wejścia
-    x_padded = pad_input(x, pad_h, pad_w)  # wejście z paddingiem
-    dx_padded = zeros(eltype(x), size(x_padded))  # gradient po wejściu z paddingiem
-    dfilters = zeros(eltype(filters), size(filters))  # gradient po filtrach
-    dbias = bias === nothing ? nothing : zeros(eltype(bias), size(bias))  # gradient po biasie, jeśli bias istnieje
+    x_padded = node.f.x_padded  # wejście z paddingiem zapamiętane z forward
+
+    if node.f.dx_padded === nothing || size(node.f.dx_padded) != size(x_padded) || eltype(node.f.dx_padded) != eltype(x)
+        node.f.dx_padded = zeros(eltype(x), size(x_padded))
+    end
+    dx_padded = node.f.dx_padded  # gradient po wejściu z paddingiem
+    fill!(dx_padded, zero(eltype(x)))
+
+    if node.f.dfilters === nothing || size(node.f.dfilters) != size(filters) || eltype(node.f.dfilters) != eltype(filters)
+        node.f.dfilters = zeros(eltype(filters), size(filters))
+    end
+    dfilters = node.f.dfilters  # gradient po filtrach
+    fill!(dfilters, zero(eltype(filters)))
+
+    dbias = nothing
+    if bias !== nothing
+        if node.f.dbias === nothing || size(node.f.dbias) != size(bias) || eltype(node.f.dbias) != eltype(bias)
+            node.f.dbias = zeros(eltype(bias), size(bias))
+        end
+        dbias = node.f.dbias
+        fill!(dbias, zero(eltype(bias)))
+    end
     out_h, out_w = size(g, 1), size(g, 2)  # rozmiar gradientu z kolejnej warstwy
 
     @inbounds for n in 1:N
@@ -99,19 +133,19 @@ end
 
 # tworzy węzeł Conv2D z biasem
 function conv2d(x::GraphNode, filters::GraphNode, bias::GraphNode; pad=(0, 0), stride=(1, 1))
-    return OperatorNode(Conv2DOp(pad, stride), x, filters, bias)
+    return OperatorNode(Conv2DOp(pad, stride, nothing, nothing, nothing, nothing, nothing), x, filters, bias)
 end
 
 # tworzy węzeł Conv2D bez biasu
 function conv2d(x::GraphNode, filters::GraphNode; pad=(0, 0), stride=(1, 1))
-    return OperatorNode(Conv2DOp(pad, stride), x, filters)
+    return OperatorNode(Conv2DOp(pad, stride, nothing, nothing, nothing, nothing, nothing), x, filters)
 end
 
 # forward dla Conv2D z biasem
-forward(node::OperatorNode{Conv2DOp}, x, filters, bias) = conv2d_forward(x, filters, bias, node.f.pad, node.f.stride)
+forward(node::OperatorNode{Conv2DOp}, x, filters, bias) = conv2d_forward(node.f, x, filters, bias)
 
 # forward dla Conv2D bez biasu
-forward(node::OperatorNode{Conv2DOp}, x, filters) = conv2d_forward(x, filters, nothing, node.f.pad, node.f.stride)
+forward(node::OperatorNode{Conv2DOp}, x, filters) = conv2d_forward(node.f, x, filters, nothing)
 
 # backward dla Conv2D z biasem
 backward(node::OperatorNode{Conv2DOp}, x, filters, bias, g) = conv2d_backward(node, x, filters, bias, g)
@@ -149,13 +183,18 @@ end
 
 # forward dla maxpoolingu 2D
 # @inbounds - „nie sprawdzaj, czy indeks tablicy jest poprawny”
-function maxpool2d_forward(x, kernel, stride)
-    k_h, k_w = kernel  # rozmiar okna poolingu
-    stride_h, stride_w = stride  # krok przesuwania okna
+function maxpool2d_forward(op::MaxPool2DOp, x)
+    k_h, k_w = op.kernel  # rozmiar okna poolingu
+    stride_h, stride_w = op.stride  # krok przesuwania okna
     H, W, C, N = size(x)  # rozmiar wejścia
     out_h = (H - k_h) ÷ stride_h + 1  # wysokość wyjścia
     out_w = (W - k_w) ÷ stride_w + 1  # szerokość wyjścia
-    out = zeros(eltype(x), out_h, out_w, C, N)  # tensor wyjściowy
+    out_size = (out_h, out_w, C, N)
+    if op.out === nothing || size(op.out) != out_size || eltype(op.out) != eltype(x)
+        op.out = zeros(eltype(x), out_size)
+    end
+    out = op.out  # tensor wyjściowy
+    fill!(out, zero(eltype(x)))
 
     @inbounds for n in 1:N
         @inbounds for c in 1:C
@@ -182,7 +221,11 @@ function maxpool2d_backward(node::OperatorNode{MaxPool2DOp}, x, g)
     k_h, k_w = node.f.kernel  # rozmiar okna
     stride_h, stride_w = node.f.stride  # krok przesuwania
     H, W, C, N = size(x)  # rozmiar wejścia
-    dx = zeros(eltype(x), size(x))  # gradient po wejściu
+    if node.f.dx === nothing || size(node.f.dx) != size(x) || eltype(node.f.dx) != eltype(x)
+        node.f.dx = zeros(eltype(x), size(x))
+    end
+    dx = node.f.dx  # gradient po wejściu
+    fill!(dx, zero(eltype(x)))
     out_h, out_w = size(g, 1), size(g, 2)  # rozmiar gradientu wyjściowego
 
     @inbounds for n in 1:N
@@ -222,11 +265,11 @@ end
 
 # tworzy węzeł operatora maxpoolingu
 function maxpool2d(x::GraphNode, kernel::Tuple{Int,Int}, stride::Tuple{Int,Int})
-    return OperatorNode(MaxPool2DOp(kernel, stride), x)
+    return OperatorNode(MaxPool2DOp(kernel, stride, nothing, nothing), x)
 end
 
 # forward dla maxpoolingu
-forward(node::OperatorNode{MaxPool2DOp}, x) = maxpool2d_forward(x, node.f.kernel, node.f.stride)
+forward(node::OperatorNode{MaxPool2DOp}, x) = maxpool2d_forward(node.f, x)
 
 # backward dla maxpoolingu
 backward(node::OperatorNode{MaxPool2DOp}, x, g) = maxpool2d_backward(node, x, g)
