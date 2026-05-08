@@ -27,7 +27,7 @@ class KM1CNN(nn.Module):
         self.flatten = nn.Flatten()
         self.fc1 = nn.Linear(16 * 7 * 7, 84)
         self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(p=0.4)
+        self.dropout = nn.Dropout(p=0.2)
         self.fc2 = nn.Linear(84, 10)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

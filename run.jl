@@ -67,7 +67,7 @@ model = Chain(
     Flatten(),
     Dense(16 * 7 * 7, 84),
     relu,
-    Dropout(0.4),
+    Dropout(0.2),
     Dense(84, 10)
 )
 
