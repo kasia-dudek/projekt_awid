@@ -56,23 +56,43 @@ function conv2d_forward(op::Conv2DOp, x, filters, bias)
     end
     out = op.out::Array{T,4}
 
-    @inbounds for n in 1:N # który obrazek w batchu
-        @inbounds for oc in 1:C_out # który kanał wyjściowy (filtr)
-            @inbounds for i in 1:out_h # która pozycja w pionie
-                @inbounds for j in 1:out_w # która pozycja w poziomie
-                    y = (i - 1) * stride_h + 1  # początek okna w pionie
-                    x0 = (j - 1) * stride_w + 1  # początek okna w poziomie
-                    acc = zero(eltype(x))  # akumulator sumy dla jednego pola wyjścia
-                    @inbounds for ic in 1:C_in
-                        @inbounds for p in 1:k_h
-                            @inbounds for q in 1:k_w
-                                acc += filters[p, q, ic, oc] * x_padded[y + p - 1, x0 + q - 1, ic, n]  # splot, konkretna waga filtra razy konkretny pixel
+    if bias === nothing
+        @inbounds for n in 1:N
+            @inbounds for oc in 1:C_out
+                @inbounds for i in 1:out_h
+                    @inbounds for j in 1:out_w
+                        y = (i - 1) * stride_h + 1
+                        x0 = (j - 1) * stride_w + 1
+                        acc = zero(eltype(x))
+                        @inbounds for ic in 1:C_in
+                            @inbounds for p in 1:k_h
+                                @inbounds for q in 1:k_w
+                                    acc += filters[p, q, ic, oc] * x_padded[y + p - 1, x0 + q - 1, ic, n]
+                                end
                             end
                         end
+                        out[i, j, oc, n] = acc
                     end
-                    out[i, j, oc, n] = acc  # zapis wyniku splotu
-                    if bias !== nothing
-                        out[i, j, oc, n] += bias[oc]  # dodanie biasu dla kanału wyjściowego
+                end
+            end
+        end
+    else
+        @inbounds for n in 1:N
+            @inbounds for oc in 1:C_out
+                b = bias[oc]
+                @inbounds for i in 1:out_h
+                    @inbounds for j in 1:out_w
+                        y = (i - 1) * stride_h + 1
+                        x0 = (j - 1) * stride_w + 1
+                        acc = zero(eltype(x))
+                        @inbounds for ic in 1:C_in
+                            @inbounds for p in 1:k_h
+                                @inbounds for q in 1:k_w
+                                    acc += filters[p, q, ic, oc] * x_padded[y + p - 1, x0 + q - 1, ic, n]
+                                end
+                            end
+                        end
+                        out[i, j, oc, n] = acc + b
                     end
                 end
             end
@@ -116,23 +136,43 @@ function conv2d_backward(node::OperatorNode{<:Conv2DOp}, x, filters, bias, g)
     end
     out_h, out_w = size(g, 1), size(g, 2)  # rozmiar gradientu z kolejnej warstwy
 
-    @inbounds for n in 1:N
-        @inbounds for oc in 1:C_out
-            @inbounds for i in 1:out_h
-                @inbounds for j in 1:out_w
-                    y = (i - 1) * stride_h + 1  # początek okna w pionie
-                    x0 = (j - 1) * stride_w + 1  # początek okna w poziomie
-                    grad = g[i, j, oc, n]  # lokalny gradient dla danej pozycji wyjścia
-                    @inbounds for ic in 1:C_in
-                        @inbounds for p in 1:k_h
-                            @inbounds for q in 1:k_w
-                                dfilters[p, q, ic, oc] += grad * x_padded[y + p - 1, x0 + q - 1, ic, n]  # gradient po wagach
-                                dx_padded[y + p - 1, x0 + q - 1, ic, n] += grad * filters[p, q, ic, oc]  # gradient po wejściu
+    if dbias === nothing
+        @inbounds for n in 1:N
+            @inbounds for oc in 1:C_out
+                @inbounds for i in 1:out_h
+                    @inbounds for j in 1:out_w
+                        y = (i - 1) * stride_h + 1
+                        x0 = (j - 1) * stride_w + 1
+                        grad = g[i, j, oc, n]
+                        @inbounds for ic in 1:C_in
+                            @inbounds for p in 1:k_h
+                                @inbounds for q in 1:k_w
+                                    dfilters[p, q, ic, oc] += grad * x_padded[y + p - 1, x0 + q - 1, ic, n]
+                                    dx_padded[y + p - 1, x0 + q - 1, ic, n] += grad * filters[p, q, ic, oc]
+                                end
                             end
                         end
                     end
-                    if dbias !== nothing
-                        dbias[oc] += grad  # bias zbiera sumę gradientów dla danego kanału
+                end
+            end
+        end
+    else
+        @inbounds for n in 1:N
+            @inbounds for oc in 1:C_out
+                @inbounds for i in 1:out_h
+                    @inbounds for j in 1:out_w
+                        y = (i - 1) * stride_h + 1
+                        x0 = (j - 1) * stride_w + 1
+                        grad = g[i, j, oc, n]
+                        @inbounds for ic in 1:C_in
+                            @inbounds for p in 1:k_h
+                                @inbounds for q in 1:k_w
+                                    dfilters[p, q, ic, oc] += grad * x_padded[y + p - 1, x0 + q - 1, ic, n]
+                                    dx_padded[y + p - 1, x0 + q - 1, ic, n] += grad * filters[p, q, ic, oc]
+                                end
+                            end
+                        end
+                        dbias[oc] += grad
                     end
                 end
             end
