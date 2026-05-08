@@ -61,6 +61,17 @@ function softmax_forward(logits)
     end
 end
 
+# liczy gradient softmax bez budowania Jacobianu
+function softmax_backward_from_probs(probs, g)
+    if ndims(probs) == 1
+        return probs .* (g .- sum(g .* probs))
+    elseif ndims(probs) == 2
+        return probs .* (g .- sum(g .* probs, dims=1))
+    else
+        error("softmax backward supports 1D or 2D tensors")
+    end
+end
+
 # tworzy w grafie węzeł operatora softmax
 function softmax(x::GraphNode)
     return OperatorNode(SoftmaxOp(), x)
@@ -69,25 +80,10 @@ end
 # forward softmax zwraca prawdopodobieństwa klas
 forward(::OperatorNode{SoftmaxOp}, x) = softmax_forward(x)
 
-# backward softmax liczy gradient przez macierz Jacobiego
+# backward softmax liczy gradient w wersji sfuzowanej (bez Jacobianu)
 function backward(::OperatorNode{SoftmaxOp}, x, g)
     probs = softmax_forward(x)  # obliczone prawdopodobieństwa softmax
-    if ndims(x) == 1
-        diag_probs = diagm(vec(probs))  # macierz diagonalna z prawdopodobieństw
-        jacobian = diag_probs .- probs * probs'  # Jacobian to macierz pochodnych cząstkowych softmax
-        return (jacobian' * g,)  # gradient dla jednej próbki
-    elseif ndims(x) == 2
-        result = similar(x)  # miejsce na gradient dla całego batcha
-        for i in 1:size(x, 2)
-            probs_i = probs[:, i]  # softmax dla i-tej próbki
-            diag_probs = diagm(vec(probs_i))  # diagonalna z prawdopodobieństw
-            jacobian = diag_probs .- probs_i * probs_i'  # Jacobian dla próbki
-            result[:, i] .= jacobian' * g[:, i]  # gradient dla i-tej kolumny
-        end
-        return (result,)  # gradient dla całego batcha
-    else
-        error("softmax backward supports 1D or 2D tensors")
-    end
+    return (softmax_backward_from_probs(probs, g),)
 end
 
 # tworzy w grafie węzeł straty cross-entropy
@@ -101,7 +97,7 @@ forward(::OperatorNode{LogitCrossEntropyOp}, logits, labels) = logitcrossentropy
 
 # backward cross-entropy liczy gradient względem logits i ewentualnie labels
 function backward(::OperatorNode{LogitCrossEntropyOp}, logits, labels, g)
-    probs = softmax_forward(logits)  # prawdopodobieństwa z logits
+    probs = softmax_forward(logits)  # prawdopodobieństwa z logits (bez osobnego węzła softmax)
     batch_size = ndims(logits) == 1 ? 1 : size(logits, 2)  # liczba próbek
     d_logits = (g / batch_size) .* (probs .- labels)  # gradient po logits
 
