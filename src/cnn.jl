@@ -1,5 +1,6 @@
 # CNN: proste Conv2D i MaxPool2D z poprawnym backward
 # Przyjmujemy układ tensorów (H, W, C, N), czyli wysokość, szerokość, kanały, batch
+using LinearAlgebra
 
 # operator splotu 2D z informacją o paddingu i kroku
 mutable struct Conv2DOp
@@ -10,6 +11,10 @@ mutable struct Conv2DOp
     dx_padded
     dfilters
     dbias
+    x_col
+    y_col
+    dy_col
+    dx_col
 end
 
 # operator maxpoolingu 2D z rozmiarem okna i krokiem
@@ -35,6 +40,78 @@ function pad_input!(padded, x, pad_h, pad_w)
     return padded
 end
 
+# im2col dla pojedynczego elementu batcha (H, W, C)
+function im2col_single!(x_col, x_padded_n, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
+    col = 1
+    @inbounds for i in 1:out_h
+        y = (i - 1) * stride_h + 1
+        @inbounds for j in 1:out_w
+            x0 = (j - 1) * stride_w + 1
+            row = 1
+            @inbounds for ic in 1:C_in
+                @inbounds for p in 1:k_h
+                    @inbounds for q in 1:k_w
+                        x_col[row, col] = x_padded_n[y + p - 1, x0 + q - 1, ic]
+                        row += 1
+                    end
+                end
+            end
+            col += 1
+        end
+    end
+    return x_col
+end
+
+# zapisuje wynik GEMM do tensora wyjścia (H, W, C_out)
+function write_y_col_to_out!(out_n, y_col, out_h, out_w, C_out)
+    @inbounds for oc in 1:C_out
+        col = 1
+        @inbounds for i in 1:out_h
+            @inbounds for j in 1:out_w
+                out_n[i, j, oc] = y_col[oc, col]
+                col += 1
+            end
+        end
+    end
+    return out_n
+end
+
+# odczytuje gradient wyjścia (H, W, C_out) do macierzy kolumnowej
+function read_g_to_dy_col!(dy_col, g_n, out_h, out_w, C_out)
+    @inbounds for oc in 1:C_out
+        col = 1
+        @inbounds for i in 1:out_h
+            @inbounds for j in 1:out_w
+                dy_col[oc, col] = g_n[i, j, oc]
+                col += 1
+            end
+        end
+    end
+    return dy_col
+end
+
+# col2im dla pojedynczego elementu batcha
+function col2im_single!(dx_padded_n, dx_col, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
+    col = 1
+    @inbounds for i in 1:out_h
+        y = (i - 1) * stride_h + 1
+        @inbounds for j in 1:out_w
+            x0 = (j - 1) * stride_w + 1
+            row = 1
+            @inbounds for ic in 1:C_in
+                @inbounds for p in 1:k_h
+                    @inbounds for q in 1:k_w
+                        dx_padded_n[y + p - 1, x0 + q - 1, ic] += dx_col[row, col]
+                        row += 1
+                    end
+                end
+            end
+            col += 1
+        end
+    end
+    return dx_padded_n
+end
+
 # forward dla warstwy Conv2D
 function conv2d_forward(op::Conv2DOp, x, filters, bias)
     T = eltype(x)
@@ -55,49 +132,34 @@ function conv2d_forward(op::Conv2DOp, x, filters, bias)
         op.out = zeros(T, out_size)  # bufor wyjścia
     end
     out = op.out::Array{T,4}
+    K = k_h * k_w * C_in
+    P = out_h * out_w
+    if op.x_col === nothing || size(op.x_col) != (K, P)
+        op.x_col = zeros(T, K, P)
+    end
+    if op.y_col === nothing || size(op.y_col) != (C_out, P)
+        op.y_col = zeros(T, C_out, P)
+    end
+    x_col = op.x_col::Matrix{T}
+    y_col = op.y_col::Matrix{T}
+    Wk = reshape(filters, K, C_out)  # K x C_out
 
-    if bias === nothing
-        @inbounds for n in 1:N
-            @inbounds for oc in 1:C_out
-                @inbounds for i in 1:out_h
-                    @inbounds for j in 1:out_w
-                        y = (i - 1) * stride_h + 1
-                        x0 = (j - 1) * stride_w + 1
-                        acc = zero(eltype(x))
-                        @inbounds for ic in 1:C_in
-                            @inbounds for p in 1:k_h
-                                @inbounds for q in 1:k_w
-                                    acc += filters[p, q, ic, oc] * x_padded[y + p - 1, x0 + q - 1, ic, n]
-                                end
-                            end
-                        end
-                        out[i, j, oc, n] = acc
-                    end
-                end
-            end
-        end
-    else
-        @inbounds for n in 1:N
+    @inbounds for n in 1:N
+        x_padded_n = @view x_padded[:, :, :, n]
+        im2col_single!(x_col, x_padded_n, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
+        mul!(y_col, transpose(Wk), x_col)  # (C_out x K) * (K x P) = (C_out x P)
+        if bias !== nothing
             @inbounds for oc in 1:C_out
                 b = bias[oc]
-                @inbounds for i in 1:out_h
-                    @inbounds for j in 1:out_w
-                        y = (i - 1) * stride_h + 1
-                        x0 = (j - 1) * stride_w + 1
-                        acc = zero(eltype(x))
-                        @inbounds for ic in 1:C_in
-                            @inbounds for p in 1:k_h
-                                @inbounds for q in 1:k_w
-                                    acc += filters[p, q, ic, oc] * x_padded[y + p - 1, x0 + q - 1, ic, n]
-                                end
-                            end
-                        end
-                        out[i, j, oc, n] = acc + b
-                    end
+                @inbounds for p in 1:P
+                    y_col[oc, p] += b
                 end
             end
         end
+        out_n = @view out[:, :, :, n]
+        write_y_col_to_out!(out_n, y_col, out_h, out_w, C_out)
     end
+
     return out
 end
 
@@ -135,46 +197,45 @@ function conv2d_backward(node::OperatorNode{<:Conv2DOp}, x, filters, bias, g)
         fill!(dbias, zero(T))
     end
     out_h, out_w = size(g, 1), size(g, 2)  # rozmiar gradientu z kolejnej warstwy
+    K = k_h * k_w * C_in
+    P = out_h * out_w
+    if node.f.x_col === nothing || size(node.f.x_col) != (K, P)
+        node.f.x_col = zeros(T, K, P)
+    end
+    if node.f.dy_col === nothing || size(node.f.dy_col) != (C_out, P)
+        node.f.dy_col = zeros(T, C_out, P)
+    end
+    if node.f.dx_col === nothing || size(node.f.dx_col) != (K, P)
+        node.f.dx_col = zeros(T, K, P)
+    end
+    x_col = node.f.x_col::Matrix{T}
+    dy_col = node.f.dy_col::Matrix{T}
+    dx_col = node.f.dx_col::Matrix{T}
 
-    if dbias === nothing
-        @inbounds for n in 1:N
+    Wk = reshape(filters, K, C_out)  # K x C_out
+    dWk = reshape(dfilters, K, C_out)  # K x C_out
+
+    @inbounds for n in 1:N
+        x_padded_n = @view x_padded[:, :, :, n]
+        g_n = @view g[:, :, :, n]
+        dx_padded_n = @view dx_padded[:, :, :, n]
+
+        im2col_single!(x_col, x_padded_n, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
+        read_g_to_dy_col!(dy_col, g_n, out_h, out_w, C_out)
+
+        # dW += X_col * dY_col'
+        mul!(dWk, x_col, transpose(dy_col), one(T), one(T))
+        # dX_col = W * dY_col
+        mul!(dx_col, Wk, dy_col)
+        col2im_single!(dx_padded_n, dx_col, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
+
+        if dbias !== nothing
             @inbounds for oc in 1:C_out
-                @inbounds for i in 1:out_h
-                    @inbounds for j in 1:out_w
-                        y = (i - 1) * stride_h + 1
-                        x0 = (j - 1) * stride_w + 1
-                        grad = g[i, j, oc, n]
-                        @inbounds for ic in 1:C_in
-                            @inbounds for p in 1:k_h
-                                @inbounds for q in 1:k_w
-                                    dfilters[p, q, ic, oc] += grad * x_padded[y + p - 1, x0 + q - 1, ic, n]
-                                    dx_padded[y + p - 1, x0 + q - 1, ic, n] += grad * filters[p, q, ic, oc]
-                                end
-                            end
-                        end
-                    end
+                s = zero(T)
+                @inbounds for p in 1:P
+                    s += dy_col[oc, p]
                 end
-            end
-        end
-    else
-        @inbounds for n in 1:N
-            @inbounds for oc in 1:C_out
-                @inbounds for i in 1:out_h
-                    @inbounds for j in 1:out_w
-                        y = (i - 1) * stride_h + 1
-                        x0 = (j - 1) * stride_w + 1
-                        grad = g[i, j, oc, n]
-                        @inbounds for ic in 1:C_in
-                            @inbounds for p in 1:k_h
-                                @inbounds for q in 1:k_w
-                                    dfilters[p, q, ic, oc] += grad * x_padded[y + p - 1, x0 + q - 1, ic, n]
-                                    dx_padded[y + p - 1, x0 + q - 1, ic, n] += grad * filters[p, q, ic, oc]
-                                end
-                            end
-                        end
-                        dbias[oc] += grad
-                    end
-                end
+                dbias[oc] += s
             end
         end
     end
@@ -185,12 +246,12 @@ end
 
 # tworzy węzeł Conv2D z biasem
 function conv2d(x::GraphNode, filters::GraphNode, bias::GraphNode; pad=(0, 0), stride=(1, 1))
-    return OperatorNode(Conv2DOp(pad, stride, nothing, nothing, nothing, nothing, nothing), x, filters, bias)
+    return OperatorNode(Conv2DOp(pad, stride, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing), x, filters, bias)
 end
 
 # tworzy węzeł Conv2D bez biasu
 function conv2d(x::GraphNode, filters::GraphNode; pad=(0, 0), stride=(1, 1))
-    return OperatorNode(Conv2DOp(pad, stride, nothing, nothing, nothing, nothing, nothing), x, filters)
+    return OperatorNode(Conv2DOp(pad, stride, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing), x, filters)
 end
 
 # forward dla Conv2D z biasem
