@@ -18,7 +18,7 @@ function build_graph(model, batch_size)
 end
 
 function reset_dropout_masks!(dropout_nodes)
-    for node in dropout_nodes
+    @inbounds for node in dropout_nodes
         MiniAD.refresh_dropout_mask!(node.f)
     end
 end
@@ -62,7 +62,7 @@ function measure_allocations(; train_batches=100, eval_batches=100, batch_size=1
     ex_var, ey_var, eval_order, _ = build_graph(model, batch_size)
     eval_alloc = @allocated begin
         c = 0
-        for (xb, yb) in eachbatch(test_X, test_y, batch_size, shuffle=false)
+        @inbounds for (xb, yb) in eachbatch(test_X, test_y, batch_size, shuffle=false)
             ex_var.output = xb
             ey_var.output = yb
             forward!(eval_order)

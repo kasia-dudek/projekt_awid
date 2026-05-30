@@ -15,12 +15,12 @@ backward(::OperatorNode{typeof(mean)}, x, g) = (fill(g / length(x), size(x)),)
 
 # exp i log element-wise
 exp(x::GraphNode) = OperatorNode(exp, x)
-forward(::OperatorNode{typeof(exp)}, x) = exp.(x)
-backward(::OperatorNode{typeof(exp)}, x, g) = (g .* exp.(x),)
+forward(::OperatorNode{typeof(exp)}, x) = @fastmath exp.(x)
+backward(::OperatorNode{typeof(exp)}, x, g) = @fastmath (g .* exp.(x),)
 
 log(x::GraphNode) = OperatorNode(log, x)
-forward(::OperatorNode{typeof(log)}, x) = log.(x)
-backward(::OperatorNode{typeof(log)}, x, g) = (g ./ x,)
+forward(::OperatorNode{typeof(log)}, x) = @fastmath log.(x)
+backward(::OperatorNode{typeof(log)}, x, g) = @fastmath (g ./ x,)
 
 # maksimum
 maximum(x::GraphNode) = OperatorNode(maximum, x)
@@ -52,7 +52,7 @@ backward(::OperatorNode{typeof(*)}, x, y, g) = matmul_backward(x, y, g)
 
 # ReLU
 relu(x::GraphNode) = OperatorNode(relu, x)
-forward(::OperatorNode{typeof(relu)}, x) = max.(0, x)
+forward(::OperatorNode{typeof(relu)}, x) = @fastmath max.(0, x)
 backward(::OperatorNode{typeof(relu)}, x, g) = (g .* (x .> 0),)
 
 # dropout

@@ -18,7 +18,7 @@ function build_graph(model, batch_size)
 end
 
 function reset_dropout_masks!(dropout_nodes)
-    for node in dropout_nodes
+    @inbounds for node in dropout_nodes
         refresh_dropout_mask!(node.f)
     end
 end
@@ -51,7 +51,7 @@ function main()
     update_t = 0.0
     total_train_t = @elapsed begin
         cnt = 0
-        for (xb, yb) in eachbatch(train_X, train_y, batch_size, shuffle=false)
+        @inbounds for (xb, yb) in eachbatch(train_X, train_y, batch_size, shuffle=false)
             x_var.output = xb
             y_var.output = yb
             reset_dropout_masks!(dropout_nodes)

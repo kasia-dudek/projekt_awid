@@ -49,7 +49,7 @@ end
 function one_hot(labels, classes)
     N = length(labels)  # liczba próbek
     y = zeros(Float32, classes, N)  # macierz wynikowa
-    for i in 1:N
+    @inbounds for i in 1:N
         y[labels[i], i] = 1f0  # ustawienie 1 dla poprawnej klasy
     end
     return y

@@ -92,7 +92,7 @@ function topo_sort(head::GraphNode)
         push!(visited, node)  # oznaczenie węzła jako odwiedzonego
 
         if node isa OperatorNode
-            for input in node.inputs
+            @inbounds for input in node.inputs
                 visit(input)  # najpierw schodzimy do wejść
             end
         end
@@ -121,7 +121,7 @@ end
 
 # przejście forward po wszystkich węzłach w dobrej kolejności
 function forward!(order::Vector{GraphNode})
-    for node in order
+    @inbounds for node in order
         compute!(node)  # obliczenie wartości danego węzła
 
         if node isa OperatorNode
@@ -195,12 +195,12 @@ function backward!(order::Vector{GraphNode}; seed=1f0)
         result.gradient = fill(seed, size(value(result)))  # gradient startowy dla tensora
     end
 
-    for node in reverse(order)
+    @inbounds for node in reverse(order)
         if node isa OperatorNode
             xs = ntuple(i -> value(node.inputs[i]), length(node.inputs))  # pobranie wartości wejść
             grads = backward(node, xs..., node.gradient)  # policzenie gradientów po wejściach
 
-            for (input, g) in zip(node.inputs, grads)
+            @inbounds for (input, g) in zip(node.inputs, grads)
                 accumulate!(input, g)  # przekazanie gradientu do poprzednich węzłów
             end
         end
@@ -223,7 +223,7 @@ end
 
 # zeruje gradienty wszystkich parametrów z wektora
 function zero_grad!(ps::AbstractVector{Variable})
-    for p in ps
+    @inbounds for p in ps
         zero_grad!(p)
     end
     return nothing
@@ -231,7 +231,7 @@ end
 
 # zeruje gradienty dla całego grafu
 function zero_grad!(order::Vector{GraphNode})
-    for node in order
+    @inbounds for node in order
         reset!(node)
     end
     return nothing

@@ -27,7 +27,7 @@ function reduce_grad(g, shape)
     nd = ndims(g)
     target = ntuple(i -> i <= length(shape) ? shape[i] : 1, nd)
     out = g
-    for d = nd:-1:1
+    @inbounds for d = nd:-1:1
         if target[d] == 1
             out = sum(out; dims=d)  # sumowanie po wymiarach broadcastowanych
         end
@@ -44,4 +44,4 @@ forward(::OperatorNode{typeof(/)}, x, y) = x ./ y
 # backward (z uwzględnieniem broadcastingu)
 backward(::OperatorNode{typeof(+)}, x, y, g) = (g, reduce_grad(g, size(y)))
 backward(::OperatorNode{typeof(-)}, x, y, g) = (g, reduce_grad(-g, size(y)))
-backward(::OperatorNode{typeof(/)}, x, y, g) = (g ./ y, reduce_grad(-g .* x ./ (y .^ 2), size(y))) 
+backward(::OperatorNode{typeof(/)}, x, y, g) = @fastmath (g ./ y, reduce_grad(-g .* x ./ (y .^ 2), size(y))) 
