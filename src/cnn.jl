@@ -2,27 +2,58 @@
 # Przyjmujemy układ tensorów (H, W, C, N), czyli wysokość, szerokość, kanały, batch
 using LinearAlgebra
 
-# operator splotu 2D z informacją o paddingu i kroku
-mutable struct Conv2DOp
+# typ elementu z grafu (przed forwardem output operatora bywa nothing)
+function graph_eltype(x::Constant{T}) where T
+    return T <: Number ? T : eltype(T)
+end
+
+function graph_eltype(x::Variable{T}) where T
+    return T <: Number ? T : eltype(T)
+end
+
+function graph_eltype(x::OperatorNode)
+    ts = Type[]
+    for inp in x.inputs
+        inp isa GraphNode || continue
+        push!(ts, graph_eltype(inp))
+    end
+    isempty(ts) && error("graph_eltype: cannot infer element type")
+    return promote_type(ts...)
+end
+
+function conv_op_eltype(x::GraphNode, filters::GraphNode)
+    return promote_type(graph_eltype(x), graph_eltype(filters))
+end
+
+# operator splotu 2D z informacją o paddingu i kroku (parametryczny T jak na wykladzie)
+mutable struct Conv2DOp{T<:AbstractFloat}
     pad::Tuple{Int,Int}
     stride::Tuple{Int,Int}
-    x_padded::Union{Nothing, Array}
-    out::Union{Nothing, Array}
-    dx_padded::Union{Nothing, Array}
-    dfilters::Union{Nothing, Array}
-    dbias::Union{Nothing, Vector}
-    x_col::Union{Nothing, Matrix}
-    y_col::Union{Nothing, Matrix}
-    dy_col::Union{Nothing, Matrix}
-    dx_col::Union{Nothing, Vector}
+    x_padded::Union{Nothing, Array{T,4}}
+    out::Union{Nothing, Array{T,4}}
+    dx_padded::Union{Nothing, Array{T,4}}
+    dfilters::Union{Nothing, Array{T,4}}
+    dbias::Union{Nothing, Vector{T}}
+    x_col::Union{Nothing, Matrix{T}}
+    y_col::Union{Nothing, Matrix{T}}
+    dy_col::Union{Nothing, Matrix{T}}
+    dx_col::Union{Nothing, Matrix{T}}
+end
+
+function Conv2DOp{T}(pad::Tuple{Int,Int}, stride::Tuple{Int,Int}) where {T<:AbstractFloat}
+    return Conv2DOp{T}(pad, stride, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
 # operator maxpoolingu 2D z rozmiarem okna i krokiem
-mutable struct MaxPool2DOp{T}
+mutable struct MaxPool2DOp{T<:AbstractFloat}
     kernel::Tuple{Int,Int}
     stride::Tuple{Int,Int}
     out::Union{Nothing, Array{T,4}}
     dx::Union{Nothing, Array{T,4}}
+end
+
+function MaxPool2DOp{T}(kernel::Tuple{Int,Int}, stride::Tuple{Int,Int}) where {T<:AbstractFloat}
+    return MaxPool2DOp{T}(kernel, stride, nothing, nothing)
 end
 
 # dodaje zerowy padding wokół wejścia
@@ -113,8 +144,7 @@ function col2im_single!(dx_padded_n, dx_col, k_h, k_w, stride_h, stride_w, out_h
 end
 
 # forward dla warstwy Conv2D
-function conv2d_forward(op::Conv2DOp, x, filters, bias)
-    T = eltype(x)
+function conv2d_forward(op::Conv2DOp{T}, x, filters, bias) where {T<:AbstractFloat}
     pad_h, pad_w = op.pad  # padding w pionie i poziomie
     stride_h, stride_w = op.stride  # krok przesuwania filtra
     k_h, k_w, C_in, C_out = size(filters)  # rozmiar filtrów i liczba kanałów
@@ -164,8 +194,7 @@ function conv2d_forward(op::Conv2DOp, x, filters, bias)
 end
 
 # backward dla Conv2D: gradient po wejściu, filtrach i biasie
-function conv2d_backward(node::OperatorNode{<:Conv2DOp}, x, filters, bias, g)
-    T = eltype(x)
+function conv2d_backward(node::OperatorNode{<:Conv2DOp{T}}, x, filters, bias, g) where {T<:AbstractFloat}
     pad_h, pad_w = node.f.pad  # odczytanie paddingu z operatora
     stride_h, stride_w = node.f.stride  # odczytanie kroku z operatora
     k_h, k_w, C_in, C_out = size(filters)  # wymiary filtrów
@@ -246,12 +275,14 @@ end
 
 # tworzy węzeł Conv2D z biasem
 function conv2d(x::GraphNode, filters::GraphNode, bias::GraphNode; pad=(0, 0), stride=(1, 1))
-    return OperatorNode(Conv2DOp(pad, stride, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing), x, filters, bias)
+    T = promote_type(conv_op_eltype(x, filters), graph_eltype(bias))
+    return OperatorNode(Conv2DOp{T}(pad, stride), x, filters, bias)
 end
 
 # tworzy węzeł Conv2D bez biasu
 function conv2d(x::GraphNode, filters::GraphNode; pad=(0, 0), stride=(1, 1))
-    return OperatorNode(Conv2DOp(pad, stride, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing), x, filters)
+    T = conv_op_eltype(x, filters)
+    return OperatorNode(Conv2DOp{T}(pad, stride), x, filters)
 end
 
 # forward dla Conv2D z biasem
@@ -296,8 +327,7 @@ end
 
 # forward dla maxpoolingu 2D
 # @inbounds - „nie sprawdzaj, czy indeks tablicy jest poprawny”
-function maxpool2d_forward(op::MaxPool2DOp, x)
-    T = eltype(x)
+function maxpool2d_forward(op::MaxPool2DOp{T}, x) where {T<:AbstractFloat}
     k_h, k_w = op.kernel  # rozmiar okna poolingu
     stride_h, stride_w = op.stride  # krok przesuwania okna
     H, W, C, N = size(x)  # rozmiar wejścia
@@ -330,8 +360,7 @@ function maxpool2d_forward(op::MaxPool2DOp, x)
 end
 
 # backward dla maxpoolingu rozdziela gradient do elementów maksymalnych
-function maxpool2d_backward(node::OperatorNode{<:MaxPool2DOp}, x, g)
-    T = eltype(x)
+function maxpool2d_backward(node::OperatorNode{<:MaxPool2DOp{T}}, x, g) where {T<:AbstractFloat}
     k_h, k_w = node.f.kernel  # rozmiar okna
     stride_h, stride_w = node.f.stride  # krok przesuwania
     H, W, C, N = size(x)  # rozmiar wejścia
@@ -379,7 +408,8 @@ end
 
 # tworzy węzeł operatora maxpoolingu
 function maxpool2d(x::GraphNode, kernel::Tuple{Int,Int}, stride::Tuple{Int,Int})
-    return OperatorNode(MaxPool2DOp(kernel, stride, nothing, nothing), x)
+    T = graph_eltype(x)
+    return OperatorNode(MaxPool2DOp{T}(kernel, stride), x)
 end
 
 # forward dla maxpoolingu
