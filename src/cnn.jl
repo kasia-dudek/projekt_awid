@@ -1,6 +1,34 @@
 # CNN: proste Conv2D i MaxPool2D z poprawnym backward
 # Przyjmujemy układ tensorów (H, W, C, N), czyli wysokość, szerokość, kanały, batch
 using LinearAlgebra
+using LinearAlgebra.BLAS: gemm!
+
+# GEMM w Conv2D (im2col): jawne BLAS zamiast alokujacego mnozenia macierzowego
+# forward:  Y = Wk' * X_col   -> gemm!('T', 'N', ...)
+# backward: dW += X_col * dY' -> gemm!('N', 'T', ..., beta=1)
+#           dX = Wk * dY      -> gemm!('N', 'N', ...)
+function conv_gemm_forward!(y_col::Matrix{T}, Wk::AbstractMatrix, x_col::Matrix{T}) where {T<:AbstractFloat}
+    if eltype(Wk) === T
+        gemm!('T', 'N', one(T), Wk, x_col, zero(T), y_col)
+    else
+        mul!(y_col, transpose(Wk), x_col)  # promocja typow (np. Float32 filtry, Float64 bufor)
+    end
+    return y_col
+end
+
+function conv_gemm_backward_dW!(dWk::Matrix{T}, x_col::Matrix{T}, dy_col::Matrix{T}) where {T<:AbstractFloat}
+    gemm!('N', 'T', one(T), x_col, dy_col, one(T), dWk)
+    return dWk
+end
+
+function conv_gemm_backward_dX!(dx_col::Matrix{T}, Wk::AbstractMatrix, dy_col::Matrix{T}) where {T<:AbstractFloat}
+    if eltype(Wk) === T
+        gemm!('N', 'N', one(T), Wk, dy_col, zero(T), dx_col)
+    else
+        mul!(dx_col, Wk, dy_col)
+    end
+    return dx_col
+end
 
 # typ elementu z grafu (przed forwardem output operatora bywa nothing)
 function graph_eltype(x::Constant{T}) where T
@@ -177,7 +205,7 @@ function conv2d_forward(op::Conv2DOp{T}, x, filters, bias) where {T<:AbstractFlo
     @inbounds for n in 1:N
         x_padded_n = @view x_padded[:, :, :, n] #tworzenie widoku na tablicę bez kopiowania danych
         im2col_single!(x_col, x_padded_n, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
-        mul!(y_col, transpose(Wk), x_col)  # (C_out x K) * (K x P) = (C_out x P)
+        conv_gemm_forward!(y_col, Wk, x_col)
         if bias !== nothing
             @inbounds for oc in 1:C_out
                 b = bias[oc]
@@ -252,10 +280,8 @@ function conv2d_backward(node::OperatorNode{<:Conv2DOp{T}}, x, filters, bias, g)
         im2col_single!(x_col, x_padded_n, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
         read_g_to_dy_col!(dy_col, g_n, out_h, out_w, C_out)
 
-        # dW += X_col * dY_col'
-        mul!(dWk, x_col, transpose(dy_col), one(T), one(T))
-        # dX_col = W * dY_col
-        mul!(dx_col, Wk, dy_col)
+        conv_gemm_backward_dW!(dWk, x_col, dy_col)
+        conv_gemm_backward_dX!(dx_col, Wk, dy_col)
         col2im_single!(dx_padded_n, dx_col, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
 
         if dbias !== nothing
