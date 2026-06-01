@@ -37,7 +37,7 @@ function build_model(dropout_p::Float32)
     )
 end
 
-function measure_allocations(; train_batches=100, eval_batches=100, batch_size=10, dropout_p=0.2f0)
+function measure_allocations(; train_batches=100, eval_batches=100, batch_size=10, dropout_p=0.4f0)
     train_X, train_y, test_X, test_y = load_fashionmnist("data")
     model = build_model(dropout_p)
     ps = params(model)
