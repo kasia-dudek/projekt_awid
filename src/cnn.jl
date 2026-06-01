@@ -6,23 +6,23 @@ using LinearAlgebra
 mutable struct Conv2DOp
     pad::Tuple{Int,Int}
     stride::Tuple{Int,Int}
-    x_padded
-    out
-    dx_padded
-    dfilters
-    dbias
-    x_col
-    y_col
-    dy_col
-    dx_col
+    x_padded::Union{Nothing, Array}
+    out::Union{Nothing, Array}
+    dx_padded::Union{Nothing, Array}
+    dfilters::Union{Nothing, Array}
+    dbias::Union{Nothing, Vector}
+    x_col::Union{Nothing, Matrix}
+    y_col::Union{Nothing, Matrix}
+    dy_col::Union{Nothing, Matrix}
+    dx_col::Union{Nothing, Vector}
 end
 
 # operator maxpoolingu 2D z rozmiarem okna i krokiem
-mutable struct MaxPool2DOp
+mutable struct MaxPool2DOp{T}
     kernel::Tuple{Int,Int}
     stride::Tuple{Int,Int}
-    out
-    dx
+    out::Union{Nothing, Array{T,4}}
+    dx::Union{Nothing, Array{T,4}}
 end
 
 # dodaje zerowy padding wokół wejścia
@@ -145,7 +145,7 @@ function conv2d_forward(op::Conv2DOp, x, filters, bias)
     Wk = reshape(filters, K, C_out)  # K x C_out
 
     @inbounds for n in 1:N
-        x_padded_n = @view x_padded[:, :, :, n]
+        x_padded_n = @view x_padded[:, :, :, n] #tworzenie widoku na tablicę bez kopiowania danych
         im2col_single!(x_col, x_padded_n, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
         mul!(y_col, transpose(Wk), x_col)  # (C_out x K) * (K x P) = (C_out x P)
         if bias !== nothing
