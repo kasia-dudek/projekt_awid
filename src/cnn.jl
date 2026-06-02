@@ -2,6 +2,7 @@
 # Przyjmujemy układ tensorów (H, W, C, N), czyli wysokość, szerokość, kanały, batch
 using LinearAlgebra
 using LinearAlgebra.BLAS: gemm!
+using StaticArrays: SVector
 
 # GEMM w Conv2D (im2col): jawne BLAS zamiast alokujacego mnozenia macierzowego
 # forward:  Y = Wk' * X_col   -> gemm!('T', 'N', ...)
@@ -28,6 +29,16 @@ function conv_gemm_backward_dX!(dx_col::Matrix{T}, Wk::AbstractMatrix, dy_col::M
         mul!(dx_col, Wk, dy_col)
     end
     return dx_col
+end
+
+# StaticArrays fast-path dla MaxPool 2x2 / stride 2
+@inline function maxpool2x2_window(x, y, x0, c, n)
+    return SVector(
+        x[y, x0, c, n],
+        x[y, x0 + 1, c, n],
+        x[y + 1, x0, c, n],
+        x[y + 1, x0 + 1, c, n],
+    )
 end
 
 # typ elementu z grafu (przed forwardem output operatora bywa nothing)
@@ -203,18 +214,18 @@ function conv2d_forward(op::Conv2DOp{T}, x, filters, bias) where {T<:AbstractFlo
     Wk = reshape(filters, K, C_out)  # K x C_out
 
     @inbounds for n in 1:N
-        x_padded_n = @view x_padded[:, :, :, n] #tworzenie widoku na tablicę bez kopiowania danych
+        @views x_padded_n = x_padded[:, :, :, n] #tworzenie widoku na tablicę bez kopiowania danych
         im2col_single!(x_col, x_padded_n, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
         conv_gemm_forward!(y_col, Wk, x_col)
         if bias !== nothing
             @inbounds for oc in 1:C_out
                 b = bias[oc]
-                @inbounds for p in 1:P
+                @inbounds @simd for p in 1:P
                     y_col[oc, p] += b
                 end
             end
         end
-        out_n = @view out[:, :, :, n]
+        @views out_n = out[:, :, :, n]
         write_y_col_to_out!(out_n, y_col, out_h, out_w, C_out)
     end
 
@@ -273,9 +284,9 @@ function conv2d_backward(node::OperatorNode{<:Conv2DOp{T}}, x, filters, bias, g)
     dWk = reshape(dfilters, K, C_out)  # K x C_out
 
     @inbounds for n in 1:N
-        x_padded_n = @view x_padded[:, :, :, n]
-        g_n = @view g[:, :, :, n]
-        dx_padded_n = @view dx_padded[:, :, :, n]
+        @views x_padded_n = x_padded[:, :, :, n]
+        @views g_n = g[:, :, :, n]
+        @views dx_padded_n = dx_padded[:, :, :, n]
 
         im2col_single!(x_col, x_padded_n, k_h, k_w, stride_h, stride_w, out_h, out_w, C_in)
         read_g_to_dy_col!(dy_col, g_n, out_h, out_w, C_out)
@@ -287,7 +298,7 @@ function conv2d_backward(node::OperatorNode{<:Conv2DOp{T}}, x, filters, bias, g)
         if dbias !== nothing
             @inbounds for oc in 1:C_out
                 s = zero(T)
-                @inbounds for p in 1:P
+                @inbounds @simd for p in 1:P
                     s += dy_col[oc, p]
                 end
                 dbias[oc] += s
@@ -365,6 +376,21 @@ function maxpool2d_forward(op::MaxPool2DOp{T}, x) where {T<:AbstractFloat}
     end
     out = op.out::Array{T,4}
 
+    if k_h == 2 && k_w == 2 && stride_h == 2 && stride_w == 2
+        @inbounds for n in 1:N
+            @inbounds for c in 1:C
+                @inbounds for i in 1:out_h
+                    @inbounds for j in 1:out_w
+                        y = (i - 1) * stride_h + 1
+                        x0 = (j - 1) * stride_w + 1
+                        out[i, j, c, n] = maximum(maxpool2x2_window(x, y, x0, c, n))
+                    end
+                end
+            end
+        end
+        return out
+    end
+
     @inbounds for n in 1:N
         @inbounds for c in 1:C
             @inbounds for i in 1:out_h
@@ -396,6 +422,29 @@ function maxpool2d_backward(node::OperatorNode{<:MaxPool2DOp{T}}, x, g) where {T
     dx = node.f.dx::Array{T,4}
     fill!(dx, zero(T))
     out_h, out_w = size(g, 1), size(g, 2)  # rozmiar gradientu wyjściowego
+
+    if k_h == 2 && k_w == 2 && stride_h == 2 && stride_w == 2
+        @inbounds for n in 1:N
+            @inbounds for c in 1:C
+                @inbounds for i in 1:out_h
+                    @inbounds for j in 1:out_w
+                        y = (i - 1) * stride_h + 1
+                        x0 = (j - 1) * stride_w + 1
+                        w = maxpool2x2_window(x, y, x0, c, n)
+                        max_val = maximum(w)
+                        eq = w .== max_val
+                        count_max = count(eq)
+                        grad = g[i, j, c, n] / count_max
+                        eq[1] && (dx[y, x0, c, n] += grad)
+                        eq[2] && (dx[y, x0 + 1, c, n] += grad)
+                        eq[3] && (dx[y + 1, x0, c, n] += grad)
+                        eq[4] && (dx[y + 1, x0 + 1, c, n] += grad)
+                    end
+                end
+            end
+        end
+        return (dx,)
+    end
 
     @inbounds for n in 1:N
         @inbounds for c in 1:C
