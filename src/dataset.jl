@@ -49,7 +49,7 @@ end
 function one_hot(labels, classes)
     N = length(labels)  # liczba próbek
     y = zeros(Float32, classes, N)  # macierz wynikowa
-    @inbounds for i in 1:N
+    @inbounds @simd for i in 1:N
         y[labels[i], i] = 1f0  # ustawienie 1 dla poprawnej klasy
     end
     return y
@@ -110,8 +110,8 @@ Base.iterate(it::BatchIterator, state=1) = state > length(it.indices) ? nothing 
     inds = it.indices[state:last]  # indeksy batcha
     Xdata = isa(it.X, Variable) ? it.X.output : it.X  # obsługa Variable i zwykłych danych
     Ydata = isa(it.y, Variable) ? it.y.output : it.y
-    xb = @view Xdata[:, :, :, inds]  # batch wejścia, @view - „nie kopiuj danych, tylko stwórz widok”
-    yb = @view Ydata[:, inds]  # batch etykiet
+    @views xb = Xdata[:, :, :, inds]  # batch wejścia, widok bez kopiowania
+    @views yb = Ydata[:, inds]  # batch etykiet, widok bez kopiowania
     ((xb, yb), last + 1)  # zwrot batcha i następnego stanu
 end
 
